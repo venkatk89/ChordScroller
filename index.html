@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>iCloud Gig Workflow Player</title>
+<title>ChordScroller</title>
 
 <style>
 body {
@@ -12,7 +12,6 @@ body {
     overflow: hidden;
 }
 
-/* VIEWER */
 #viewer {
     position: absolute;
     top: 0;
@@ -24,7 +23,6 @@ body {
     background: #f2f2f2;
 }
 
-/* PDF CANVAS */
 canvas {
     display: block;
     margin: 0 auto 20px auto;
@@ -32,7 +30,6 @@ canvas {
     border-radius: 6px;
 }
 
-/* CONTROL DOCK */
 #controls {
     position: fixed;
     bottom: 15px;
@@ -46,12 +43,6 @@ canvas {
     align-items: center;
     z-index: 20;
     box-shadow: 0 2px 10px rgba(0,0,0,0.15);
-    transition: opacity 0.3s ease;
-}
-
-.hidden {
-    opacity: 0;
-    pointer-events: none;
 }
 
 button {
@@ -70,6 +61,11 @@ button {
 input[type="range"] {
     width: 100px;
 }
+
+.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
 </style>
 </head>
 
@@ -77,7 +73,6 @@ input[type="range"] {
 
 <div id="controls">
 
-    <!-- iCloud MULTI IMPORT -->
     <input type="file" id="fileInput" accept="application/pdf" multiple>
 
     <select id="songList"></select>
@@ -90,7 +85,7 @@ input[type="range"] {
     <input type="range" min="0.15" max="2.2" step="0.05" value="1.0" id="speedSlider">
     <span id="speedVal">1.0x</span>
 
-    <button id="tapBtn" onclick="tapTempo()">🥁 Tap</button>
+    <button onclick="tapTempo()">🥁 Tap</button>
 
 </div>
 
@@ -104,11 +99,14 @@ input[type="range"] {
 let setlist = [];
 let currentSong = 0;
 let isPlaying = false;
+
 let speed = 1.0;
 
 let container = document.getElementById("viewer");
-let hideTimer = null;
+
+let lastTime = null;
 let wakeLock = null;
+let hasContent = false;
 
 /* ---------------- WAKE LOCK ---------------- */
 async function enableWakeLock() {
@@ -126,30 +124,13 @@ function disableWakeLock() {
     }
 }
 
-/* ---------------- UI AUTO HIDE ---------------- */
-function showControls() {
-    document.getElementById("controls").classList.remove("hidden");
-
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => {
-        if (isPlaying) hideControls();
-    }, 1200);
-}
-
-function hideControls() {
-    document.getElementById("controls").classList.add("hidden");
-}
-
-document.addEventListener("mousemove", showControls);
-document.addEventListener("keydown", showControls);
-
 /* ---------------- SPEED SLIDER ---------------- */
 document.getElementById("speedSlider").addEventListener("input", (e) => {
     speed = parseFloat(e.target.value);
     document.getElementById("speedVal").innerText = speed.toFixed(2) + "x";
 });
 
-/* ---------------- iCloud FILE IMPORT ---------------- */
+/* ---------------- FILE IMPORT ---------------- */
 document.getElementById("fileInput").addEventListener("change", async (e) => {
     let files = Array.from(e.target.files);
     if (!files.length) return;
@@ -186,9 +167,13 @@ function buildList() {
 /* ---------------- LOAD SONG ---------------- */
 async function loadSong(i) {
     currentSong = i;
-    container.innerHTML = "";
 
-    let pdf = await pdfjsLib.getDocument(setlist[i].pdf).promise;
+    container.innerHTML = "";
+    container.scrollTop = 0;
+
+    hasContent = false;
+
+    const pdf = await pdfjsLib.getDocument(setlist[i].pdf).promise;
 
     for (let p = 1; p <= pdf.numPages; p++) {
         let page = await pdf.getPage(p);
@@ -205,15 +190,22 @@ async function loadSong(i) {
         container.appendChild(canvas);
     }
 
-    resetScroll();
-    showControls();
+    // stage buffer (top lead-in space)
+    let spacer = document.createElement("div");
+    spacer.style.height = container.clientHeight + "px";
+    container.insertBefore(spacer, container.firstChild);
+
+    hasContent = container.scrollHeight > container.clientHeight + 5;
 }
 
-/* ---------------- FIXED TIME-BASED AUTO SCROLL ---------------- */
-let lastTime = null;
-
+/* ---------------- AUTO SCROLL (STABLE VELOCITY ENGINE) ---------------- */
 function autoScroll(time) {
     if (!isPlaying) return;
+
+    if (!hasContent) {
+        stopScroll();
+        return;
+    }
 
     if (!lastTime) lastTime = time;
     let delta = time - lastTime;
@@ -225,47 +217,42 @@ function autoScroll(time) {
     let pos = container.scrollTop;
     let progress = pos / max;
 
-    // REAL SPEED: pixels per second
-    let baseSpeed = (speed * (song?.speed || 1.0)) * 60;
+    // ✅ stable velocity model (pixels per second)
+    let velocity = 18 * speed * (song?.speed || 1.0);
 
-    let step = (baseSpeed * delta) / 1000;
+    // easing
+    if (progress < 0.15) velocity *= 0.75;
+    else if (progress > 0.85) velocity *= 0.70;
 
-    // gentle easing
-    if (progress < 0.15) step *= 0.7;
-    else if (progress > 0.85) step *= 0.65;
+    let step = (velocity * delta) / 1000;
 
-    // ensure minimum perceptible movement
-    let minStep = 0.25;
-
-    if (step > 0 && step < minStep) step = minStep;
-
+    // ⬇️ DOWNWARD SCROLL (your chosen direction)
     container.scrollTop += step;
 
-    if (pos >= max) {
-        isPlaying = false;
-        updatePlay();
-        disableWakeLock();
-        showControls();
-        lastTime = null;
+    if (pos >= max - 2) {
+        stopScroll();
         return;
     }
 
     requestAnimationFrame(autoScroll);
 }
 
-/* ---------------- TAP TEMPO-BASED AUTO SCROLL ---------------- */
+/* ---------------- STOP ENGINE ---------------- */
+function stopScroll() {
+    isPlaying = false;
+    lastTime = null;
+    disableWakeLock();
+    updatePlay();
+}
+
+/* ---------------- TAP TEMPO ---------------- */
 let tapTimes = [];
-let tapSpeed = null;
 
 function tapTempo() {
     let now = performance.now();
 
     tapTimes.push(now);
-
-    // keep only last 4 taps
-    if (tapTimes.length > 4) {
-        tapTimes.shift();
-    }
+    if (tapTimes.length > 4) tapTimes.shift();
 
     if (tapTimes.length >= 2) {
         let intervals = [];
@@ -276,14 +263,9 @@ function tapTempo() {
 
         let avg = intervals.reduce((a,b) => a + b, 0) / intervals.length;
 
-        // convert ms → scroll speed multiplier
-        // (tuned for your system)
         let bpm = 60000 / avg;
 
-        // map BPM → speed (safe range)
-        tapSpeed = Math.max(0.15, Math.min(2.2, bpm / 120));
-
-        speed = tapSpeed;
+        speed = Math.max(0.15, Math.min(2.2, bpm / 120));
 
         document.getElementById("speedSlider").value = speed;
         document.getElementById("speedVal").innerText = speed.toFixed(2) + "x";
@@ -296,13 +278,11 @@ function togglePlay() {
     updatePlay();
 
     if (isPlaying) {
-        hideControls();
         enableWakeLock();
         lastTime = null;
         requestAnimationFrame(autoScroll);
     } else {
-        showControls();
-        disableWakeLock();
+        stopScroll();
     }
 }
 
@@ -319,11 +299,7 @@ function prevSong() {
     if (currentSong > 0) loadSong(currentSong - 1);
 }
 
-function resetScroll() {
-    container.scrollTop = 0;
-}
-
-/* ---------------- INIT PDF ENGINE ---------------- */
+/* ---------------- INIT ---------------- */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
