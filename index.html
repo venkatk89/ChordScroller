@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Ukulele Performance Assistant v3-lite</title>
+<title>iCloud Gig Workflow Player</title>
 
 <style>
 body {
@@ -24,6 +24,7 @@ body {
     background: #f2f2f2;
 }
 
+/* PDF CANVAS */
 canvas {
     display: block;
     margin: 0 auto 20px auto;
@@ -31,48 +32,43 @@ canvas {
     border-radius: 6px;
 }
 
-/* 🎛 CONTROL DOCK (light grey now) */
+/* CONTROL DOCK */
 #controls {
     position: fixed;
     bottom: 15px;
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(230,230,230,0.95); /* LIGHT GREY FIX */
+    background: rgba(230,230,230,0.96);
     padding: 10px 12px;
     border-radius: 14px;
     display: flex;
     gap: 10px;
     align-items: center;
     z-index: 20;
-    transition: opacity 0.35s ease;
     box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    transition: opacity 0.3s ease;
 }
 
-/* hidden controls */
 .hidden {
     opacity: 0;
     pointer-events: none;
 }
 
-/* BUTTON STYLING IMPROVEMENTS */
 button {
     border: none;
     border-radius: 8px;
     padding: 6px 10px;
     cursor: pointer;
-    background: #ffffff;
-    color: #111;
+    background: white;
 }
 
-/* 🎯 MAKE PLAY BUTTON WIDER */
 #playBtn {
     min-width: 90px;
     font-weight: bold;
 }
 
-/* SPEED SLIDER LOOK */
 input[type="range"] {
-    width: 90px;
+    width: 100px;
 }
 </style>
 </head>
@@ -81,22 +77,20 @@ input[type="range"] {
 
 <div id="controls">
 
-    <input type="file" id="fileInput" accept="application/pdf">
+    <!-- iCloud MULTI IMPORT -->
+    <input type="file" id="fileInput" accept="application/pdf" multiple>
 
     <select id="songList"></select>
 
     <button onclick="prevSong()">⏮</button>
-
-    <!-- WIDE PLAY BUTTON -->
-    <button id="playBtn" onclick="togglePlay()">▶️ Play</button>
-
+    <button id="playBtn" onclick="togglePlay()">▶ Play</button>
     <button onclick="nextSong()">⏭</button>
 
     Speed:
-    <input type="range" min="0.3" max="2.2" step="0.05" value="1.0" id="speedSlider">
+    <input type="range" min="0.15" max="2.2" step="0.05" value="1.0" id="speedSlider">
     <span id="speedVal">1.0x</span>
 
-    <button onclick="resetScroll()">↺</button>
+    <button id="tapBtn" onclick="tapTempo()">🥁 Tap</button>
 
 </div>
 
@@ -114,14 +108,29 @@ let speed = 1.0;
 
 let container = document.getElementById("viewer");
 let hideTimer = null;
+let wakeLock = null;
 
-/* ---------------- CONTROLS VISIBILITY ---------------- */
+/* ---------------- WAKE LOCK ---------------- */
+async function enableWakeLock() {
+    try {
+        if ('wakeLock' in navigator) {
+            wakeLock = await navigator.wakeLock.request('screen');
+        }
+    } catch (e) {}
+}
+
+function disableWakeLock() {
+    if (wakeLock) {
+        wakeLock.release();
+        wakeLock = null;
+    }
+}
+
+/* ---------------- UI AUTO HIDE ---------------- */
 function showControls() {
-    let c = document.getElementById("controls");
-    c.classList.remove("hidden");
+    document.getElementById("controls").classList.remove("hidden");
 
     clearTimeout(hideTimer);
-
     hideTimer = setTimeout(() => {
         if (isPlaying) hideControls();
     }, 1200);
@@ -131,34 +140,36 @@ function hideControls() {
     document.getElementById("controls").classList.add("hidden");
 }
 
-/* interaction triggers */
 document.addEventListener("mousemove", showControls);
 document.addEventListener("keydown", showControls);
 
-/* ---------------- SPEED ---------------- */
-document.getElementById("speedSlider").oninput = (e) => {
+/* ---------------- SPEED SLIDER ---------------- */
+document.getElementById("speedSlider").addEventListener("input", (e) => {
     speed = parseFloat(e.target.value);
     document.getElementById("speedVal").innerText = speed.toFixed(2) + "x";
-};
+});
 
-/* ---------------- FILE IMPORT ---------------- */
+/* ---------------- iCloud FILE IMPORT ---------------- */
 document.getElementById("fileInput").addEventListener("change", async (e) => {
-    let file = e.target.files[0];
-    if (!file) return;
+    let files = Array.from(e.target.files);
+    if (!files.length) return;
 
-    let buffer = await file.arrayBuffer();
+    for (let file of files) {
+        let buffer = await file.arrayBuffer();
 
-    setlist.push({
-        name: file.name.replace(".pdf",""),
-        pdf: buffer
-    });
+        setlist.push({
+            name: file.name.replace(".pdf",""),
+            pdf: buffer,
+            speed: 1.0
+        });
+    }
 
-    updateList();
-    loadSong(setlist.length - 1);
+    buildList();
+    loadSong(setlist.length - files.length);
 });
 
 /* ---------------- SONG LIST ---------------- */
-function updateList() {
+function buildList() {
     let sel = document.getElementById("songList");
     sel.innerHTML = "";
 
@@ -189,10 +200,7 @@ async function loadSong(i) {
         canvas.height = viewport.height;
         canvas.width = viewport.width;
 
-        await page.render({
-            canvasContext: ctx,
-            viewport: viewport
-        }).promise;
+        await page.render({ canvasContext: ctx, viewport }).promise;
 
         container.appendChild(canvas);
     }
@@ -201,69 +209,121 @@ async function loadSong(i) {
     showControls();
 }
 
-/* ---------------- AUTO SCROLL ---------------- */
-function autoScroll() {
+/* ---------------- FIXED TIME-BASED AUTO SCROLL ---------------- */
+let lastTime = null;
+
+function autoScroll(time) {
     if (!isPlaying) return;
+
+    if (!lastTime) lastTime = time;
+    let delta = time - lastTime;
+    lastTime = time;
+
+    let song = setlist[currentSong];
 
     let max = container.scrollHeight - container.clientHeight;
     let pos = container.scrollTop;
-
     let progress = pos / max;
 
-    let step = speed;
+    // REAL SPEED: pixels per second
+    let baseSpeed = (speed * (song?.speed || 1.0)) * 60;
 
-    // gentle musical feel
+    let step = (baseSpeed * delta) / 1000;
+
+    // gentle easing
     if (progress < 0.15) step *= 0.7;
     else if (progress > 0.85) step *= 0.65;
+
+    // ensure minimum perceptible movement
+    let minStep = 0.25;
+
+    if (step > 0 && step < minStep) step = minStep;
 
     container.scrollTop += step;
 
     if (pos >= max) {
         isPlaying = false;
-        updatePlayButton();
+        updatePlay();
+        disableWakeLock();
         showControls();
+        lastTime = null;
         return;
     }
 
     requestAnimationFrame(autoScroll);
 }
 
-/* ---------------- PLAY BUTTON UI ---------------- */
-function updatePlayButton() {
-    document.getElementById("playBtn").innerText =
-        isPlaying ? "⏸ Pause" : "▶️ Play";
+/* ---------------- TAP TEMPO-BASED AUTO SCROLL ---------------- */
+let tapTimes = [];
+let tapSpeed = null;
+
+function tapTempo() {
+    let now = performance.now();
+
+    tapTimes.push(now);
+
+    // keep only last 4 taps
+    if (tapTimes.length > 4) {
+        tapTimes.shift();
+    }
+
+    if (tapTimes.length >= 2) {
+        let intervals = [];
+
+        for (let i = 1; i < tapTimes.length; i++) {
+            intervals.push(tapTimes[i] - tapTimes[i - 1]);
+        }
+
+        let avg = intervals.reduce((a,b) => a + b, 0) / intervals.length;
+
+        // convert ms → scroll speed multiplier
+        // (tuned for your system)
+        let bpm = 60000 / avg;
+
+        // map BPM → speed (safe range)
+        tapSpeed = Math.max(0.15, Math.min(2.2, bpm / 120));
+
+        speed = tapSpeed;
+
+        document.getElementById("speedSlider").value = speed;
+        document.getElementById("speedVal").innerText = speed.toFixed(2) + "x";
+    }
 }
 
 /* ---------------- CONTROLS ---------------- */
 function togglePlay() {
     isPlaying = !isPlaying;
-    updatePlayButton();
+    updatePlay();
 
     if (isPlaying) {
         hideControls();
-        autoScroll();
+        enableWakeLock();
+        lastTime = null;
+        requestAnimationFrame(autoScroll);
     } else {
         showControls();
+        disableWakeLock();
     }
+}
+
+function updatePlay() {
+    document.getElementById("playBtn").innerText =
+        isPlaying ? "⏸ Pause" : "▶ Play";
 }
 
 function nextSong() {
-    if (currentSong < setlist.length - 1) {
-        loadSong(currentSong + 1);
-    }
+    if (currentSong < setlist.length - 1) loadSong(currentSong + 1);
 }
 
 function prevSong() {
-    if (currentSong > 0) {
-        loadSong(currentSong - 1);
-    }
+    if (currentSong > 0) loadSong(currentSong - 1);
 }
 
 function resetScroll() {
     container.scrollTop = 0;
 }
 
-/* PDF ENGINE */
+/* ---------------- INIT PDF ENGINE ---------------- */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
