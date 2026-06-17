@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Ukulele Performance Assistant v3-lite</title>
+
+<style>
+body {
+    margin: 0;
+    background: #f2f2f2;
+    font-family: sans-serif;
+    overflow: hidden;
+}
+
+/* VIEWER */
+#viewer {
+    position: absolute;
+    top: 0;
+    bottom: 90px;
+    left: 0;
+    right: 0;
+    overflow-y: scroll;
+    padding: 20px 10px 120px 10px;
+    background: #f2f2f2;
+}
+
+canvas {
+    display: block;
+    margin: 0 auto 20px auto;
+    background: white;
+    border-radius: 6px;
+}
+
+/* 🎛 CONTROL DOCK (light grey now) */
+#controls {
+    position: fixed;
+    bottom: 15px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(230,230,230,0.95); /* LIGHT GREY FIX */
+    padding: 10px 12px;
+    border-radius: 14px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    z-index: 20;
+    transition: opacity 0.35s ease;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+}
+
+/* hidden controls */
+.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* BUTTON STYLING IMPROVEMENTS */
+button {
+    border: none;
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    background: #ffffff;
+    color: #111;
+}
+
+/* 🎯 MAKE PLAY BUTTON WIDER */
+#playBtn {
+    min-width: 90px;
+    font-weight: bold;
+}
+
+/* SPEED SLIDER LOOK */
+input[type="range"] {
+    width: 90px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="controls">
+
+    <input type="file" id="fileInput" accept="application/pdf">
+
+    <select id="songList"></select>
+
+    <button onclick="prevSong()">⏮</button>
+
+    <!-- WIDE PLAY BUTTON -->
+    <button id="playBtn" onclick="togglePlay()">▶️ Play</button>
+
+    <button onclick="nextSong()">⏭</button>
+
+    Speed:
+    <input type="range" min="0.3" max="2.2" step="0.05" value="1.0" id="speedSlider">
+    <span id="speedVal">1.0x</span>
+
+    <button onclick="resetScroll()">↺</button>
+
+</div>
+
+<div id="viewer"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<script>
+
+/* ---------------- STATE ---------------- */
+let setlist = [];
+let currentSong = 0;
+let isPlaying = false;
+let speed = 1.0;
+
+let container = document.getElementById("viewer");
+let hideTimer = null;
+
+/* ---------------- CONTROLS VISIBILITY ---------------- */
+function showControls() {
+    let c = document.getElementById("controls");
+    c.classList.remove("hidden");
+
+    clearTimeout(hideTimer);
+
+    hideTimer = setTimeout(() => {
+        if (isPlaying) hideControls();
+    }, 1200);
+}
+
+function hideControls() {
+    document.getElementById("controls").classList.add("hidden");
+}
+
+/* interaction triggers */
+document.addEventListener("mousemove", showControls);
+document.addEventListener("keydown", showControls);
+
+/* ---------------- SPEED ---------------- */
+document.getElementById("speedSlider").oninput = (e) => {
+    speed = parseFloat(e.target.value);
+    document.getElementById("speedVal").innerText = speed.toFixed(2) + "x";
+};
+
+/* ---------------- FILE IMPORT ---------------- */
+document.getElementById("fileInput").addEventListener("change", async (e) => {
+    let file = e.target.files[0];
+    if (!file) return;
+
+    let buffer = await file.arrayBuffer();
+
+    setlist.push({
+        name: file.name.replace(".pdf",""),
+        pdf: buffer
+    });
+
+    updateList();
+    loadSong(setlist.length - 1);
+});
+
+/* ---------------- SONG LIST ---------------- */
+function updateList() {
+    let sel = document.getElementById("songList");
+    sel.innerHTML = "";
+
+    setlist.forEach((s,i) => {
+        let opt = document.createElement("option");
+        opt.value = i;
+        opt.textContent = s.name;
+        sel.appendChild(opt);
+    });
+
+    sel.onchange = () => loadSong(parseInt(sel.value));
+}
+
+/* ---------------- LOAD SONG ---------------- */
+async function loadSong(i) {
+    currentSong = i;
+    container.innerHTML = "";
+
+    let pdf = await pdfjsLib.getDocument(setlist[i].pdf).promise;
+
+    for (let p = 1; p <= pdf.numPages; p++) {
+        let page = await pdf.getPage(p);
+        let viewport = page.getViewport({ scale: 1.5 });
+
+        let canvas = document.createElement("canvas");
+        let ctx = canvas.getContext("2d");
+
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        await page.render({
+            canvasContext: ctx,
+            viewport: viewport
+        }).promise;
+
+        container.appendChild(canvas);
+    }
+
+    resetScroll();
+    showControls();
+}
+
+/* ---------------- AUTO SCROLL ---------------- */
+function autoScroll() {
+    if (!isPlaying) return;
+
+    let max = container.scrollHeight - container.clientHeight;
+    let pos = container.scrollTop;
+
+    let progress = pos / max;
+
+    let step = speed;
+
+    // gentle musical feel
+    if (progress < 0.15) step *= 0.7;
+    else if (progress > 0.85) step *= 0.65;
+
+    container.scrollTop += step;
+
+    if (pos >= max) {
+        isPlaying = false;
+        updatePlayButton();
+        showControls();
+        return;
+    }
+
+    requestAnimationFrame(autoScroll);
+}
+
+/* ---------------- PLAY BUTTON UI ---------------- */
+function updatePlayButton() {
+    document.getElementById("playBtn").innerText =
+        isPlaying ? "⏸ Pause" : "▶️ Play";
+}
+
+/* ---------------- CONTROLS ---------------- */
+function togglePlay() {
+    isPlaying = !isPlaying;
+    updatePlayButton();
+
+    if (isPlaying) {
+        hideControls();
+        autoScroll();
+    } else {
+        showControls();
+    }
+}
+
+function nextSong() {
+    if (currentSong < setlist.length - 1) {
+        loadSong(currentSong + 1);
+    }
+}
+
+function prevSong() {
+    if (currentSong > 0) {
+        loadSong(currentSong - 1);
+    }
+}
+
+function resetScroll() {
+    container.scrollTop = 0;
+}
+
+/* PDF ENGINE */
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+</script>
+
+</body>
+</html>
